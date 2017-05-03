@@ -6,15 +6,14 @@ extern crate syntax;
 
 use syntax::attr::contains_name;
 use rustc::lint::{LintPass, LateLintPass, LintArray, LateContext, LintContext};
-use rustc_const_eval::eval_const_expr;
+use rustc_const_eval::ConstContext;
 use rustc::middle::const_val::ConstVal::*;
 use rustc_plugin::registry::Registry;
 use rustc::hir;
-use syntax::ext::base::{ExtCtxt, MacResult, DummyResult, TTMacroExpander, MacEager};
-use syntax::ext::base::SyntaxExtension::NormalTT;
+use syntax::ext::base::{ExtCtxt, MacResult, DummyResult, MacEager};
 use syntax::codemap::Span;
-use syntax::ast::ItemKind;
-use syntax::parse::token::{intern, gensym_ident};
+use syntax::ast::{Ident, ItemKind};
+use syntax::symbol::Symbol;
 use syntax::ext::build::AstBuilder;
 use syntax::feature_gate::AttributeType;
 use syntax::tokenstream::TokenTree;
@@ -30,20 +29,16 @@ impl LintPass for StaticAssertPass {
     }
 }
 
-impl LateLintPass for StaticAssertPass {
-    fn check_item(&mut self, cx: &LateContext, it: &hir::Item) {
-        if !contains_name(&it.attrs, "static_assert_helper_attribute") {
+impl<'a, 'tcx> LateLintPass<'a,'tcx> for StaticAssertPass {
+    fn check_expr(&mut self, cx: &LateContext<'a, 'tcx>, expr: &'tcx hir::Expr) {
+        if !contains_name(&expr.attrs, "static_assert_helper_attribute") {
             return;
         }
-        let evaluated = if let hir::ItemConst(_, ref expr) = it.node {
-            eval_const_expr(cx.tcx, expr)
-        } else {
-            return
-        };
+        let evaluated = ConstContext::with_tables(cx.tcx, cx.tables).eval(expr);
         match evaluated {
-            Bool(true) => {},
-            Bool(false) => cx.span_lint(STATIC_ASSERT, it.span, "static assertion failed"),
-            c => cx.sess().struct_span_err(it.span, &format!("static assertion on {:?}", c)).emit(),
+            Ok(Bool(true)) => {},
+            Ok(Bool(false)) => cx.span_lint(STATIC_ASSERT, expr.span, "static assertion failed"),
+            c => cx.sess().struct_span_err(expr.span, &format!("static assertion on {:?}", c)).emit(),
         }
     }
 }
@@ -51,22 +46,19 @@ impl LateLintPass for StaticAssertPass {
 #[plugin_registrar]
 pub fn plugin_registrar(reg: &mut Registry) {
     reg.register_late_lint_pass(box StaticAssertPass);
-    reg.register_syntax_extension(intern("static_assert"), NormalTT(box StaticAssertMacro, None, false));
+    reg.register_macro("static_assert", static_assert_expand);
     reg.register_attribute("static_assert_helper_attribute".to_owned(), AttributeType::Whitelisted)
 }
 
-struct StaticAssertMacro;
-
-impl TTMacroExpander for StaticAssertMacro {
-    fn expand<'cx>(&self, cx: &'cx mut ExtCtxt, sp: Span, args: &[TokenTree]) -> Box<MacResult + 'cx> {
+fn static_assert_expand<'cx>(cx: &'cx mut ExtCtxt, sp: Span, args: &[TokenTree]) -> Box<MacResult + 'cx> {
         match cx.new_parser_from_tts(args).parse_expr() {
             Ok(e) => {
                 let item = cx.item(
                     sp,
-                    gensym_ident("ASSERTION"),
+                    Ident::with_empty_ctxt(Symbol::gensym("ASSERTION")),
                     vec![
-                        cx.attribute(sp, cx.meta_word(sp, intern("static_assert_helper_attribute").as_str())),
-                        cx.attribute(sp, cx.meta_list(sp, intern("allow").as_str(), vec![cx.meta_word(sp, intern("dead_code").as_str())])),
+                        cx.attribute(sp, cx.meta_word(sp, Symbol::intern("static_assert_helper_attribute"))),
+                        cx.attribute(sp, cx.meta_list(sp, Symbol::intern("allow"), vec![cx.meta_list_item_word(sp, Symbol::intern("dead_code"))])),
                     ],
                     ItemKind::Const(cx.ty_ident(sp, cx.ident_of("bool")), e),
                 );
@@ -82,5 +74,4 @@ impl TTMacroExpander for StaticAssertMacro {
                 DummyResult::any(sp)
             },
         }
-    }
 }
