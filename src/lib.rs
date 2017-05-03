@@ -21,7 +21,9 @@ use syntax::tokenstream::TokenTree;
 declare_lint!(STATIC_ASSERT, Deny,
               "check compile-time information");
 
-struct StaticAssertPass;
+struct StaticAssertPass {
+    in_static_assert: bool
+}
 
 impl LintPass for StaticAssertPass {
     fn get_lints(&self) -> LintArray {
@@ -31,9 +33,8 @@ impl LintPass for StaticAssertPass {
 
 impl<'a, 'tcx> LateLintPass<'a,'tcx> for StaticAssertPass {
     fn check_expr(&mut self, cx: &LateContext<'a, 'tcx>, expr: &'tcx hir::Expr) {
-        if !contains_name(&expr.attrs, "static_assert_helper_attribute") {
-            return;
-        }
+        if !self.in_static_assert { return; }
+        self.in_static_assert = false;
         let evaluated = ConstContext::with_tables(cx.tcx, cx.tables).eval(expr);
         match evaluated {
             Ok(Bool(true)) => {},
@@ -41,11 +42,22 @@ impl<'a, 'tcx> LateLintPass<'a,'tcx> for StaticAssertPass {
             c => cx.sess().struct_span_err(expr.span, &format!("static assertion on {:?}", c)).emit(),
         }
     }
+
+    fn check_item(&mut self, _cx: &LateContext<'a, 'tcx>, it: &'tcx hir::Item) {
+        if !contains_name(&it.attrs, "static_assert_helper_attribute") {
+            return;
+        }
+        self.in_static_assert = true;
+    }
+
+    fn check_item_post(&mut self, _cx: &LateContext<'a, 'tcx>, _it: &'tcx hir::Item) {
+        self.in_static_assert = false;
+    }
 }
 
 #[plugin_registrar]
 pub fn plugin_registrar(reg: &mut Registry) {
-    reg.register_late_lint_pass(box StaticAssertPass);
+    reg.register_late_lint_pass(box StaticAssertPass { in_static_assert: false });
     reg.register_macro("static_assert", static_assert_expand);
     reg.register_attribute("static_assert_helper_attribute".to_owned(), AttributeType::Whitelisted)
 }
